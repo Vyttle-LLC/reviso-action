@@ -7,6 +7,10 @@ branding:
   color: "purple"
 
 inputs:
+  github_token:
+    description: "GitHub token for reading PR data and posting review comments"
+    required: false
+    default: ${{ github.token }}
   reviso_api_key:
     description: "API key for authenticating with the Reviso API"
     required: true

@@ -9,18 +9,18 @@
 
 ## Phase 1: Core Action Logic
 
-- [ ] Gather PR metadata — Use `@actions/github` to extract PR number, title, description, author, refs, repo
-- [ ] Fetch changed files & diffs — GitHub API to get changed files with patches + optional full contents
-- [ ] Build the request payload — Assemble `POST /v1/review` body matching the API spec
-- [ ] Call the Reviso API — HTTP POST with auth header and payload
-- [ ] Parse the response — Validate and deserialize structured review response
+- [x] Gather PR metadata — Use `@actions/github` to extract PR number, title, description, author, refs, repo
+- [x] Fetch changed files & diffs — GitHub API to get changed files with patches + optional full contents
+- [x] Build the request payload — Assemble `POST /v1/review` body matching the API spec
+- [x] Call the Reviso API — HTTP POST with auth header and payload
+- [x] Parse the response — Validate and deserialize structured review response
 
 ## Phase 2: PR Comment Posting
 
-- [ ] Post inline review comments — Map issues to GitHub PR review comments (file + line)
-- [ ] Post review summary comment — Summary + metrics as top-level PR comment or review body
-- [ ] Severity filtering — Only post issues at or above configured `severity_threshold`
-- [ ] Idempotency — On re-runs, update/replace existing Reviso comments instead of duplicating
+- [x] Post inline review comments — Map issues to GitHub PR review comments (file + line)
+- [x] Post review summary comment — Summary + metrics as top-level PR comment or review body
+- [x] Severity filtering — Only post issues at or above configured `severity_threshold`
+- [x] Idempotency — On re-runs, update/replace existing Reviso comments instead of duplicating
 
 ## Phase 3: Configuration & Inputs
 
