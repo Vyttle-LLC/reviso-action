@@ -16,6 +16,6 @@
     }
   },
   "files": {
-    "ignore": ["node_modules", "lib", "dist", "coverage"]
+    "ignore": ["node_modules", "lib", "dist", "coverage", ".claude"]
   }
 }

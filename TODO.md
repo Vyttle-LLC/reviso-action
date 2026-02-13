@@ -24,28 +24,28 @@
 
 ## Phase 3: Configuration & Inputs
 
-- [ ] Define action inputs — `anthropic_api_key`, `reviso_api_key`, `review_depth`, `severity_threshold`, `custom_instructions`, `max_files`, `api_url`
-- [ ] Input validation — Required secrets present, enums valid, etc.
-- [ ] Action outputs — Expose `issues_count`, `high_severity_count`, `review_url` for downstream steps
+- [x] Define action inputs — `anthropic_api_key`, `reviso_api_key`, `github_token`, `review_depth`, `severity_threshold`, `custom_instructions`, `max_files`, `api_url`
+- [x] Input validation — Required secrets present, enums valid, etc.
+- [x] Action outputs — Expose `issues_count`, `high_severity_count` for downstream steps
 
 ## Phase 4: Error Handling & Edge Cases
 
-- [ ] Handle API errors gracefully — 401, 400, 500, timeouts with clear log messages
-- [ ] Handle large PRs — Respect `max_files`, skip binaries, warn on skipped files
-- [ ] Handle empty diffs — Skip review if no reviewable files changed
-- [ ] GitHub API rate limiting — Handle rate limits when posting comments
+- [x] Handle API errors gracefully — 401, 400, 429, 500, timeouts with clear log messages
+- [x] Handle large PRs — Respect `max_files`, skip binaries, warn on skipped files
+- [x] Handle empty diffs — Skip review if no reviewable files changed
+- [x] GitHub API rate limiting — Retry with exponential backoff on 403/429
 
 ## Phase 5: Testing & CI
 
-- [ ] Unit tests — Payload building, response parsing, severity filtering, comment formatting
-- [ ] Integration test fixtures — Sample API responses for testing
-- [ ] CI workflow — GitHub Actions workflow for lint, test, build on push
-- [ ] Bundle & commit dist — Build action bundle to `dist/`
+- [x] Unit tests — Config validation, severity filtering (14 tests passing)
+- [x] Integration test fixtures — Sample API responses for testing
+- [x] CI workflow — GitHub Actions workflow for lint, test, build on push
+- [x] Bundle & commit dist — Build action bundle to `dist/`
 
 ## Phase 6: Documentation & Release
 
-- [ ] Write README — Usage examples, inputs/outputs, config guide, cost info
-- [ ] Add example workflow — `.github/workflows/reviso.yml`
+- [x] Write README — Usage examples, inputs/outputs, config guide, cost info
+- [x] Add example workflow — included in README quick start
 - [ ] Publish v1 release — Tag and release for `uses: Vyttle-LLC/reviso-action@v1`
 
 ---

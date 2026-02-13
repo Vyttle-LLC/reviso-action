@@ -151,6 +151,30 @@ const github = __importStar(__nccwpck_require__(3228));
 const SEVERITY_ORDER = { high: 3, medium: 2, low: 1 };
 const SEVERITY_EMOJI = { high: "🔴", medium: "🟡", low: "🔵" };
 const BOT_SIGNATURE = "<!-- reviso-review -->";
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 1000;
+// ── Rate Limit Handling ─────────────────────────────────────────
+/**
+ * Retry a GitHub API call with exponential backoff on rate limit (403/429).
+ */
+async function withRetry(fn, label) {
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        try {
+            return await fn();
+        }
+        catch (error) {
+            const status = error.status;
+            const isRateLimit = status === 403 || status === 429;
+            if (!isRateLimit || attempt === MAX_RETRIES - 1) {
+                throw error;
+            }
+            const delay = BASE_DELAY_MS * 2 ** attempt;
+            core.warning(`Rate limited on ${label}, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+            await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+    }
+    throw new Error(`Unreachable: ${label} retry loop exited without return or throw`);
+}
 // ── Severity Filtering ──────────────────────────────────────────
 /**
  * Filter issues to only those at or above the configured severity threshold.
@@ -223,7 +247,7 @@ async function deleteExistingSummary(octokit, owner, repo, prNumber) {
             break;
         for (const comment of comments) {
             if (comment.body?.includes(BOT_SIGNATURE)) {
-                await octokit.rest.issues.deleteComment({ owner, repo, comment_id: comment.id });
+                await withRetry(() => octokit.rest.issues.deleteComment({ owner, repo, comment_id: comment.id }), "delete comment");
                 found = true;
                 core.debug(`Deleted previous Reviso summary comment #${comment.id}`);
             }
@@ -346,14 +370,14 @@ async function postReview(config, prNumber, response) {
     // ── Post the PR review with inline comments ──
     if (comments.length > 0) {
         try {
-            await octokit.rest.pulls.createReview({
+            await withRetry(() => octokit.rest.pulls.createReview({
                 owner,
                 repo,
                 pull_number: prNumber,
                 event: "COMMENT",
                 body: BOT_SIGNATURE,
                 comments,
-            });
+            }), "create review");
             core.info(`Posted ${comments.length} inline review comments.`);
         }
         catch (error) {
@@ -375,12 +399,12 @@ async function postReview(config, prNumber, response) {
         // Insert before the bot signature
         summaryBody = summaryBody.replace(BOT_SIGNATURE, `${skippedSection.join("\n")}\n\n${BOT_SIGNATURE}`);
     }
-    await octokit.rest.issues.createComment({
+    await withRetry(() => octokit.rest.issues.createComment({
         owner,
         repo,
         issue_number: prNumber,
         body: summaryBody,
-    });
+    }), "create summary comment");
     core.info("Posted review summary comment.");
 }
 //# sourceMappingURL=comments.js.map
