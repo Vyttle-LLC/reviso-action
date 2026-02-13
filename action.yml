@@ -1,0 +1,45 @@
+name: "Reviso — AI Code Review"
+description: "Send PR diffs to the Reviso API for AI-powered, multi-pass code review"
+author: "Vyttle LLC"
+
+branding:
+  icon: "eye"
+  color: "purple"
+
+inputs:
+  reviso_api_key:
+    description: "API key for authenticating with the Reviso API"
+    required: true
+  anthropic_api_key:
+    description: "Your Anthropic API key (used by Reviso to call Claude)"
+    required: true
+  review_depth:
+    description: "Review depth: quick (diff only), auto (smart triggers), thorough (all passes)"
+    required: false
+    default: "auto"
+  severity_threshold:
+    description: "Minimum severity to post comments for: high, medium, or low"
+    required: false
+    default: "low"
+  custom_instructions:
+    description: "Additional instructions to include in the review prompt"
+    required: false
+    default: ""
+  max_files:
+    description: "Maximum number of files to include in the review"
+    required: false
+    default: "20"
+  api_url:
+    description: "Reviso API base URL (override for self-hosted or testing)"
+    required: false
+    default: "https://api.reviso.dev"
+
+outputs:
+  issues_count:
+    description: "Total number of issues found"
+  high_severity_count:
+    description: "Number of high-severity issues found"
+
+runs:
+  using: "node20"
+  main: "dist/index.js"
