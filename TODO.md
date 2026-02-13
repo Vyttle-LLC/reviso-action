@@ -46,7 +46,8 @@
 
 - [x] Write README — Usage examples, inputs/outputs, config guide, cost info
 - [x] Add example workflow — included in README quick start
-- [ ] Publish v1 release — Tag and release for `uses: Vyttle-LLC/reviso-action@v1`
+- [x] Release workflow — Auto-creates GitHub Release + updates major version tag (`v1`, `v2`, etc.)
+- [ ] Publish v1 release — `git tag v1.0.0 && git push origin v1.0.0`
 
 ---
 
