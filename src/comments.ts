@@ -158,18 +158,20 @@ function formatSummaryComment(
 // ── Idempotency ─────────────────────────────────────────────────
 
 /**
- * Find and delete any existing Reviso summary comments on the PR.
- * Extracts cost metadata from the most recent summary before deleting.
- * Returns the previous meta (if any) and whether a previous comment existed.
+ * Find existing Reviso summary comments on the PR.
+ * Returns the best comment to reuse (the one with the most cost history)
+ * plus any extra duplicates that should be cleaned up.
+ * Extracts cost metadata from the best comment.
  */
-async function deleteExistingSummary(
+async function findExistingSummaries(
   octokit: ReturnType<typeof github.getOctokit>,
   owner: string,
   repo: string,
   prNumber: number,
-): Promise<{ hadPrevious: boolean; previousMeta: RevisoMeta | null }> {
-  let hadPrevious = false;
+): Promise<{ commentId: number | null; previousMeta: RevisoMeta | null; duplicateIds: number[] }> {
+  let bestCommentId: number | null = null;
   let previousMeta: RevisoMeta | null = null;
+  const allCommentIds: number[] = [];
   let page = 1;
 
   while (true) {
@@ -185,21 +187,20 @@ async function deleteExistingSummary(
 
     for (const comment of comments) {
       if (comment.body?.includes(BOT_SIGNATURE)) {
-        // Extract cost metadata before deleting (use the latest one found)
-        const meta = parseRevisoMeta(comment.body);
-        if (meta) {
-          previousMeta = meta;
-          core.debug(
-            `Extracted cost metadata: ${meta.reviews.length} previous reviews, $${meta.total_cost.toFixed(4)} total`,
-          );
-        }
+        allCommentIds.push(comment.id);
 
-        await withRetry(
-          () => octokit.rest.issues.deleteComment({ owner, repo, comment_id: comment.id }),
-          "delete comment",
-        );
-        hadPrevious = true;
-        core.debug(`Deleted previous Reviso summary comment #${comment.id}`);
+        // Keep the comment with the most cost history for reuse
+        const meta = parseRevisoMeta(comment.body);
+        if (meta && meta.reviews.length > (previousMeta?.reviews.length ?? 0)) {
+          previousMeta = meta;
+          bestCommentId = comment.id;
+          core.debug(
+            `Found summary comment #${comment.id} with ${meta.reviews.length} reviews, $${meta.total_cost.toFixed(4)} total`,
+          );
+        } else if (bestCommentId === null) {
+          // No meta found yet — use this comment as fallback (e.g., legacy comment without meta)
+          bestCommentId = comment.id;
+        }
       }
     }
 
@@ -207,7 +208,10 @@ async function deleteExistingSummary(
     page++;
   }
 
-  return { hadPrevious, previousMeta };
+  // Duplicates are any Reviso comments that aren't the one we're keeping
+  const duplicateIds = allCommentIds.filter((id) => id !== bestCommentId);
+
+  return { commentId: bestCommentId, previousMeta, duplicateIds };
 }
 
 /**
@@ -291,12 +295,25 @@ export async function postReview(
   const octokit = github.getOctokit(config.github_token);
   const { owner, repo } = github.context.repo;
 
-  // ── Idempotency: clean up previous Reviso comments + extract cost meta ──
-  const { hadPrevious, previousMeta } = await deleteExistingSummary(octokit, owner, repo, prNumber);
+  // ── Idempotency: find previous summary + extract cost meta ──
+  const {
+    commentId: existingSummaryId,
+    previousMeta,
+    duplicateIds,
+  } = await findExistingSummaries(octokit, owner, repo, prNumber);
   await deleteExistingReviews(octokit, owner, repo, prNumber);
 
-  if (hadPrevious) {
-    core.info("Replaced previous Reviso review (re-run detected).");
+  // Clean up duplicate summary comments (from crash/retry edge cases)
+  for (const dupId of duplicateIds) {
+    await withRetry(
+      () => octokit.rest.issues.deleteComment({ owner, repo, comment_id: dupId }),
+      "delete duplicate comment",
+    );
+    core.debug(`Deleted duplicate Reviso summary comment #${dupId}`);
+  }
+
+  if (existingSummaryId) {
+    core.info("Updating existing Reviso summary (re-run detected).");
   }
 
   // ── Build cumulative cost metadata ──
@@ -408,16 +425,29 @@ export async function postReview(
     );
   }
 
-  await withRetry(
-    () =>
-      octokit.rest.issues.createComment({
-        owner,
-        repo,
-        issue_number: prNumber,
-        body: summaryBody,
-      }),
-    "create summary comment",
-  );
-
-  core.info("Posted review summary comment.");
+  if (existingSummaryId) {
+    await withRetry(
+      () =>
+        octokit.rest.issues.updateComment({
+          owner,
+          repo,
+          comment_id: existingSummaryId,
+          body: summaryBody,
+        }),
+      "update summary comment",
+    );
+    core.info("Updated existing review summary comment.");
+  } else {
+    await withRetry(
+      () =>
+        octokit.rest.issues.createComment({
+          owner,
+          repo,
+          issue_number: prNumber,
+          body: summaryBody,
+        }),
+      "create summary comment",
+    );
+    core.info("Posted review summary comment.");
+  }
 }
