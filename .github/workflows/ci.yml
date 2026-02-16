@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -38,3 +42,20 @@ jobs:
       - name: Check dist is up to date
         run: |
           git diff --exit-code dist/ || (echo "::error::dist/ is out of date. Run 'npm run build && npm run package' and commit the result." && exit 1)
+
+  review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Reviso Code Review
+        uses: ./
+        with:
+          reviso_api_key: ${{ secrets.REVISO_API_KEY }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          review_depth: auto
+          severity_threshold: low

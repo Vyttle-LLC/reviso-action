@@ -1,10 +1,11 @@
 import * as core from "@actions/core";
 import * as github from "@actions/github";
-import type { ActionConfig, ReviewIssue, ReviewResponse, Severity } from "./types.js";
+import type { ActionConfig, ReviewIssue, ReviewResponse, RevisoMeta, Severity } from "./types.js";
 
 const SEVERITY_ORDER: Record<Severity, number> = { high: 3, medium: 2, low: 1 };
 const SEVERITY_EMOJI: Record<Severity, string> = { high: "🔴", medium: "🟡", low: "🔵" };
 const BOT_SIGNATURE = "<!-- reviso-review -->";
+const META_REGEX = /<!-- reviso-meta:(.*?) -->/s;
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
 
@@ -45,6 +46,49 @@ export function filterBySeverity(issues: ReviewIssue[], threshold: Severity): Re
   return issues.filter((issue) => SEVERITY_ORDER[issue.severity] >= minLevel);
 }
 
+// ── Cost Metadata ──────────────────────────────────────────────
+
+/**
+ * Parse the reviso-meta JSON blob from a summary comment body.
+ * Returns null if the metadata is missing or unparseable.
+ */
+export function parseRevisoMeta(commentBody: string): RevisoMeta | null {
+  const match = commentBody.match(META_REGEX);
+  if (!match?.[1]) return null;
+
+  try {
+    const parsed = JSON.parse(match[1]);
+
+    // Basic shape validation
+    if (!Array.isArray(parsed.reviews) || typeof parsed.total_cost !== "number") {
+      return null;
+    }
+
+    return parsed as RevisoMeta;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Serialize a RevisoMeta object into a hidden HTML comment string.
+ */
+export function serializeRevisoMeta(meta: RevisoMeta): string {
+  return `<!-- reviso-meta:${JSON.stringify(meta)} -->`;
+}
+
+/**
+ * Build a RevisoMeta by appending a new review entry to the previous meta.
+ */
+function buildUpdatedMeta(previous: RevisoMeta | null, reviewId: string, cost: number): RevisoMeta {
+  const reviews = previous?.reviews ?? [];
+  const entry = { id: reviewId, cost, timestamp: new Date().toISOString() };
+  const updatedReviews = [...reviews, entry];
+  const totalCost = updatedReviews.reduce((sum, r) => sum + r.cost, 0);
+
+  return { reviews: updatedReviews, total_cost: totalCost };
+}
+
 // ── Comment Formatting ──────────────────────────────────────────
 
 /**
@@ -65,10 +109,19 @@ function formatIssueComment(issue: ReviewIssue): string {
 }
 
 /**
- * Build the summary comment body with metrics and issue overview.
+ * Build the summary comment body with metrics, cumulative cost, and issue overview.
  */
-function formatSummaryComment(response: ReviewResponse, filteredCount: number): string {
+function formatSummaryComment(
+  response: ReviewResponse,
+  filteredCount: number,
+  meta: RevisoMeta,
+): string {
   const { metrics, summary } = response;
+
+  const costLine =
+    meta.reviews.length > 1
+      ? `| Estimated cost | $${metrics.estimated_cost_usd.toFixed(4)} (this review) · $${meta.total_cost.toFixed(4)} total across ${meta.reviews.length} reviews |`
+      : `| Estimated cost | $${metrics.estimated_cost_usd.toFixed(4)} |`;
 
   const lines = [
     "## 🔍 Reviso Code Review",
@@ -87,7 +140,7 @@ function formatSummaryComment(response: ReviewResponse, filteredCount: number): 
     `| Low severity | ${metrics.low_severity_count} |`,
     `| Passes run | ${metrics.passes_run.join(", ")} |`,
     `| Models used | ${metrics.models_used.join(", ")} |`,
-    `| Estimated cost | $${metrics.estimated_cost_usd.toFixed(4)} |`,
+    costLine,
   ];
 
   if (filteredCount < metrics.issues_found) {
@@ -97,7 +150,7 @@ function formatSummaryComment(response: ReviewResponse, filteredCount: number): 
     );
   }
 
-  lines.push("", BOT_SIGNATURE);
+  lines.push("", serializeRevisoMeta(meta), BOT_SIGNATURE);
 
   return lines.join("\n");
 }
@@ -105,16 +158,18 @@ function formatSummaryComment(response: ReviewResponse, filteredCount: number): 
 // ── Idempotency ─────────────────────────────────────────────────
 
 /**
- * Find and delete any existing Reviso summary comment on the PR.
- * Returns true if a previous comment was found (indicating a re-run).
+ * Find and delete any existing Reviso summary comments on the PR.
+ * Extracts cost metadata from the most recent summary before deleting.
+ * Returns the previous meta (if any) and whether a previous comment existed.
  */
 async function deleteExistingSummary(
   octokit: ReturnType<typeof github.getOctokit>,
   owner: string,
   repo: string,
   prNumber: number,
-): Promise<boolean> {
-  let found = false;
+): Promise<{ hadPrevious: boolean; previousMeta: RevisoMeta | null }> {
+  let hadPrevious = false;
+  let previousMeta: RevisoMeta | null = null;
   let page = 1;
 
   while (true) {
@@ -130,11 +185,20 @@ async function deleteExistingSummary(
 
     for (const comment of comments) {
       if (comment.body?.includes(BOT_SIGNATURE)) {
+        // Extract cost metadata before deleting (use the latest one found)
+        const meta = parseRevisoMeta(comment.body);
+        if (meta) {
+          previousMeta = meta;
+          core.debug(
+            `Extracted cost metadata: ${meta.reviews.length} previous reviews, $${meta.total_cost.toFixed(4)} total`,
+          );
+        }
+
         await withRetry(
           () => octokit.rest.issues.deleteComment({ owner, repo, comment_id: comment.id }),
           "delete comment",
         );
-        found = true;
+        hadPrevious = true;
         core.debug(`Deleted previous Reviso summary comment #${comment.id}`);
       }
     }
@@ -143,7 +207,7 @@ async function deleteExistingSummary(
     page++;
   }
 
-  return found;
+  return { hadPrevious, previousMeta };
 }
 
 /**
@@ -227,13 +291,23 @@ export async function postReview(
   const octokit = github.getOctokit(config.github_token);
   const { owner, repo } = github.context.repo;
 
-  // ── Idempotency: clean up previous Reviso comments ──
-  const hadPreviousReview = await deleteExistingSummary(octokit, owner, repo, prNumber);
+  // ── Idempotency: clean up previous Reviso comments + extract cost meta ──
+  const { hadPrevious, previousMeta } = await deleteExistingSummary(octokit, owner, repo, prNumber);
   await deleteExistingReviews(octokit, owner, repo, prNumber);
 
-  if (hadPreviousReview) {
+  if (hadPrevious) {
     core.info("Replaced previous Reviso review (re-run detected).");
   }
+
+  // ── Build cumulative cost metadata ──
+  const meta = buildUpdatedMeta(
+    previousMeta,
+    response.review_id,
+    response.metrics.estimated_cost_usd,
+  );
+  core.info(
+    `Cost: $${response.metrics.estimated_cost_usd.toFixed(4)} this review${meta.reviews.length > 1 ? ` · $${meta.total_cost.toFixed(4)} total (${meta.reviews.length} reviews)` : ""}`,
+  );
 
   // ── Filter issues by severity threshold ──
   const filteredIssues = filterBySeverity(response.issues, config.severity_threshold);
@@ -314,7 +388,7 @@ export async function postReview(
   }
 
   // ── Post summary comment ──
-  let summaryBody = formatSummaryComment(response, filteredIssues.length);
+  let summaryBody = formatSummaryComment(response, filteredIssues.length, meta);
 
   // Append any issues that couldn't be posted inline
   if (skippedIssues.length > 0) {
