@@ -145,12 +145,15 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.filterBySeverity = filterBySeverity;
+exports.parseRevisoMeta = parseRevisoMeta;
+exports.serializeRevisoMeta = serializeRevisoMeta;
 exports.postReview = postReview;
 const core = __importStar(__nccwpck_require__(7484));
 const github = __importStar(__nccwpck_require__(3228));
 const SEVERITY_ORDER = { high: 3, medium: 2, low: 1 };
 const SEVERITY_EMOJI = { high: "🔴", medium: "🟡", low: "🔵" };
 const BOT_SIGNATURE = "<!-- reviso-review -->";
+const META_REGEX = /<!-- reviso-meta:(.*?) -->/s;
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
 // ── Rate Limit Handling ─────────────────────────────────────────
@@ -183,6 +186,43 @@ function filterBySeverity(issues, threshold) {
     const minLevel = SEVERITY_ORDER[threshold];
     return issues.filter((issue) => SEVERITY_ORDER[issue.severity] >= minLevel);
 }
+// ── Cost Metadata ──────────────────────────────────────────────
+/**
+ * Parse the reviso-meta JSON blob from a summary comment body.
+ * Returns null if the metadata is missing or unparseable.
+ */
+function parseRevisoMeta(commentBody) {
+    const match = commentBody.match(META_REGEX);
+    if (!match?.[1])
+        return null;
+    try {
+        const parsed = JSON.parse(match[1]);
+        // Basic shape validation
+        if (!Array.isArray(parsed.reviews) || typeof parsed.total_cost !== "number") {
+            return null;
+        }
+        return parsed;
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * Serialize a RevisoMeta object into a hidden HTML comment string.
+ */
+function serializeRevisoMeta(meta) {
+    return `<!-- reviso-meta:${JSON.stringify(meta)} -->`;
+}
+/**
+ * Build a RevisoMeta by appending a new review entry to the previous meta.
+ */
+function buildUpdatedMeta(previous, reviewId, cost) {
+    const reviews = previous?.reviews ?? [];
+    const entry = { id: reviewId, cost, timestamp: new Date().toISOString() };
+    const updatedReviews = [...reviews, entry];
+    const totalCost = updatedReviews.reduce((sum, r) => sum + r.cost, 0);
+    return { reviews: updatedReviews, total_cost: totalCost };
+}
 // ── Comment Formatting ──────────────────────────────────────────
 /**
  * Format a single issue as a markdown inline comment body.
@@ -198,10 +238,13 @@ function formatIssueComment(issue) {
     return body;
 }
 /**
- * Build the summary comment body with metrics and issue overview.
+ * Build the summary comment body with metrics, cumulative cost, and issue overview.
  */
-function formatSummaryComment(response, filteredCount) {
+function formatSummaryComment(response, filteredCount, meta) {
     const { metrics, summary } = response;
+    const costLine = meta.reviews.length > 1
+        ? `| Estimated cost | $${metrics.estimated_cost_usd.toFixed(4)} (this review) · $${meta.total_cost.toFixed(4)} total across ${meta.reviews.length} reviews |`
+        : `| Estimated cost | $${metrics.estimated_cost_usd.toFixed(4)} |`;
     const lines = [
         "## 🔍 Reviso Code Review",
         "",
@@ -219,21 +262,25 @@ function formatSummaryComment(response, filteredCount) {
         `| Low severity | ${metrics.low_severity_count} |`,
         `| Passes run | ${metrics.passes_run.join(", ")} |`,
         `| Models used | ${metrics.models_used.join(", ")} |`,
-        `| Estimated cost | $${metrics.estimated_cost_usd.toFixed(4)} |`,
+        costLine,
     ];
     if (filteredCount < metrics.issues_found) {
         lines.push("", `> **Note:** ${metrics.issues_found - filteredCount} issues below the severity threshold were omitted from inline comments.`);
     }
-    lines.push("", BOT_SIGNATURE);
+    lines.push("", serializeRevisoMeta(meta), BOT_SIGNATURE);
     return lines.join("\n");
 }
 // ── Idempotency ─────────────────────────────────────────────────
 /**
- * Find and delete any existing Reviso summary comment on the PR.
- * Returns true if a previous comment was found (indicating a re-run).
+ * Find existing Reviso summary comments on the PR.
+ * Returns the best comment to reuse (the one with the most cost history)
+ * plus any extra duplicates that should be cleaned up.
+ * Extracts cost metadata from the best comment.
  */
-async function deleteExistingSummary(octokit, owner, repo, prNumber) {
-    let found = false;
+async function findExistingSummaries(octokit, owner, repo, prNumber) {
+    let bestCommentId = null;
+    let previousMeta = null;
+    const allCommentIds = [];
     let page = 1;
     while (true) {
         const { data: comments } = await octokit.rest.issues.listComments({
@@ -247,16 +294,27 @@ async function deleteExistingSummary(octokit, owner, repo, prNumber) {
             break;
         for (const comment of comments) {
             if (comment.body?.includes(BOT_SIGNATURE)) {
-                await withRetry(() => octokit.rest.issues.deleteComment({ owner, repo, comment_id: comment.id }), "delete comment");
-                found = true;
-                core.debug(`Deleted previous Reviso summary comment #${comment.id}`);
+                allCommentIds.push(comment.id);
+                // Keep the comment with the most cost history for reuse
+                const meta = parseRevisoMeta(comment.body);
+                if (meta && meta.reviews.length > (previousMeta?.reviews.length ?? 0)) {
+                    previousMeta = meta;
+                    bestCommentId = comment.id;
+                    core.debug(`Found summary comment #${comment.id} with ${meta.reviews.length} reviews, $${meta.total_cost.toFixed(4)} total`);
+                }
+                else if (bestCommentId === null) {
+                    // No meta found yet — use this comment as fallback (e.g., legacy comment without meta)
+                    bestCommentId = comment.id;
+                }
             }
         }
         if (comments.length < 100)
             break;
         page++;
     }
-    return found;
+    // Duplicates are any Reviso comments that aren't the one we're keeping
+    const duplicateIds = allCommentIds.filter((id) => id !== bestCommentId);
+    return { commentId: bestCommentId, previousMeta, duplicateIds };
 }
 /**
  * Delete any existing Reviso PR review (inline comments) on the PR.
@@ -322,12 +380,20 @@ function buildPositionMap(patch) {
 async function postReview(config, prNumber, response) {
     const octokit = github.getOctokit(config.github_token);
     const { owner, repo } = github.context.repo;
-    // ── Idempotency: clean up previous Reviso comments ──
-    const hadPreviousReview = await deleteExistingSummary(octokit, owner, repo, prNumber);
+    // ── Idempotency: find previous summary + extract cost meta ──
+    const { commentId: existingSummaryId, previousMeta, duplicateIds, } = await findExistingSummaries(octokit, owner, repo, prNumber);
     await deleteExistingReviews(octokit, owner, repo, prNumber);
-    if (hadPreviousReview) {
-        core.info("Replaced previous Reviso review (re-run detected).");
+    // Clean up duplicate summary comments (from crash/retry edge cases)
+    for (const dupId of duplicateIds) {
+        await withRetry(() => octokit.rest.issues.deleteComment({ owner, repo, comment_id: dupId }), "delete duplicate comment");
+        core.debug(`Deleted duplicate Reviso summary comment #${dupId}`);
     }
+    if (existingSummaryId) {
+        core.info("Updating existing Reviso summary (re-run detected).");
+    }
+    // ── Build cumulative cost metadata ──
+    const meta = buildUpdatedMeta(previousMeta, response.review_id, response.metrics.estimated_cost_usd);
+    core.info(`Cost: $${response.metrics.estimated_cost_usd.toFixed(4)} this review${meta.reviews.length > 1 ? ` · $${meta.total_cost.toFixed(4)} total (${meta.reviews.length} reviews)` : ""}`);
     // ── Filter issues by severity threshold ──
     const filteredIssues = filterBySeverity(response.issues, config.severity_threshold);
     core.info(`Posting ${filteredIssues.length}/${response.issues.length} issues ` +
@@ -387,7 +453,7 @@ async function postReview(config, prNumber, response) {
         }
     }
     // ── Post summary comment ──
-    let summaryBody = formatSummaryComment(response, filteredIssues.length);
+    let summaryBody = formatSummaryComment(response, filteredIssues.length, meta);
     // Append any issues that couldn't be posted inline
     if (skippedIssues.length > 0) {
         const skippedSection = [
@@ -399,13 +465,24 @@ async function postReview(config, prNumber, response) {
         // Insert before the bot signature
         summaryBody = summaryBody.replace(BOT_SIGNATURE, `${skippedSection.join("\n")}\n\n${BOT_SIGNATURE}`);
     }
-    await withRetry(() => octokit.rest.issues.createComment({
-        owner,
-        repo,
-        issue_number: prNumber,
-        body: summaryBody,
-    }), "create summary comment");
-    core.info("Posted review summary comment.");
+    if (existingSummaryId) {
+        await withRetry(() => octokit.rest.issues.updateComment({
+            owner,
+            repo,
+            comment_id: existingSummaryId,
+            body: summaryBody,
+        }), "update summary comment");
+        core.info("Updated existing review summary comment.");
+    }
+    else {
+        await withRetry(() => octokit.rest.issues.createComment({
+            owner,
+            repo,
+            issue_number: prNumber,
+            body: summaryBody,
+        }), "create summary comment");
+        core.info("Posted review summary comment.");
+    }
 }
 //# sourceMappingURL=comments.js.map
 

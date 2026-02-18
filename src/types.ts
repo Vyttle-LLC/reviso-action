@@ -86,6 +86,19 @@ export interface ReviewResponse {
   metrics: ReviewMetrics;
 }
 
+// ── Cost Tracking ──────────────────────────────────────────────
+
+export interface ReviewCostEntry {
+  id: string;
+  cost: number;
+  timestamp: string;
+}
+
+export interface RevisoMeta {
+  reviews: ReviewCostEntry[];
+  total_cost: number;
+}
+
 // ── Config ──────────────────────────────────────────────────────
 
 export interface ActionConfig {
