@@ -215,14 +215,20 @@ async function findExistingSummaries(
 }
 
 /**
- * Delete any existing Reviso PR review (inline comments) on the PR.
+ * Delete all Reviso inline review comments on the PR.
+ *
+ * We identify Reviso review comments by finding reviews whose body contains
+ * our bot signature, then deleting each comment belonging to those reviews.
+ * GitHub doesn't allow deleting or dismissing COMMENT-type reviews themselves,
+ * but we can delete their individual comments.
  */
-async function deleteExistingReviews(
+async function deleteExistingReviewComments(
   octokit: ReturnType<typeof github.getOctokit>,
   owner: string,
   repo: string,
   prNumber: number,
 ): Promise<void> {
+  // Step 1: Find Reviso review IDs
   const { data: reviews } = await octokit.rest.pulls.listReviews({
     owner,
     repo,
@@ -230,24 +236,51 @@ async function deleteExistingReviews(
     per_page: 100,
   });
 
+  const revisoReviewIds = new Set<number>();
   for (const review of reviews) {
-    // Check if this review's body contains our signature
     if (review.body?.includes(BOT_SIGNATURE)) {
-      // We can't delete reviews, but we can dismiss them
-      try {
-        await octokit.rest.pulls.dismissReview({
-          owner,
-          repo,
-          pull_number: prNumber,
-          review_id: review.id,
-          message: "Replaced by a new Reviso review.",
-        });
-        core.debug(`Dismissed previous Reviso review #${review.id}`);
-      } catch {
-        // Dismissal may fail if the review isn't approved/changes_requested
-        core.debug(`Could not dismiss review #${review.id} — may be a COMMENT review`);
+      revisoReviewIds.add(review.id);
+    }
+  }
+
+  if (revisoReviewIds.size === 0) return;
+
+  // Step 2: List all review comments and delete those belonging to Reviso reviews
+  let page = 1;
+  let deletedCount = 0;
+
+  while (true) {
+    const { data: comments } = await octokit.rest.pulls.listReviewComments({
+      owner,
+      repo,
+      pull_number: prNumber,
+      per_page: 100,
+      page,
+    });
+
+    if (comments.length === 0) break;
+
+    for (const comment of comments) {
+      if (comment.pull_request_review_id && revisoReviewIds.has(comment.pull_request_review_id)) {
+        await withRetry(
+          () =>
+            octokit.rest.pulls.deleteReviewComment({
+              owner,
+              repo,
+              comment_id: comment.id,
+            }),
+          "delete review comment",
+        );
+        deletedCount++;
       }
     }
+
+    if (comments.length < 100) break;
+    page++;
+  }
+
+  if (deletedCount > 0) {
+    core.debug(`Deleted ${deletedCount} previous Reviso inline comments.`);
   }
 }
 
@@ -301,7 +334,7 @@ export async function postReview(
     previousMeta,
     duplicateIds,
   } = await findExistingSummaries(octokit, owner, repo, prNumber);
-  await deleteExistingReviews(octokit, owner, repo, prNumber);
+  await deleteExistingReviewComments(octokit, owner, repo, prNumber);
 
   // Clean up duplicate summary comments (from crash/retry edge cases)
   for (const dupId of duplicateIds) {
