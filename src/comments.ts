@@ -478,5 +478,5 @@ export async function postReview(
       }),
     "create summary comment",
   );
-  core.info("Posted review summary comment.")
+  core.info("Posted review summary comment.");
 }
