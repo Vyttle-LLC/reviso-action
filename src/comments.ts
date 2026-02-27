@@ -158,20 +158,42 @@ function formatSummaryComment(
 // ── Idempotency ─────────────────────────────────────────────────
 
 /**
+ * Minimize (collapse) a comment via GitHub's GraphQL API.
+ * Falls back silently on failure so we don't block the review.
+ */
+async function minimizeComment(
+  octokit: ReturnType<typeof github.getOctokit>,
+  nodeId: string,
+): Promise<boolean> {
+  try {
+    await octokit.graphql(
+      `mutation MinimizeComment($id: ID!) {
+        minimizeComment(input: { subjectId: $id, classifier: OUTDATED }) {
+          minimizedComment { isMinimized }
+        }
+      }`,
+      { id: nodeId },
+    );
+    return true;
+  } catch (error) {
+    core.warning(`Failed to minimize comment (node ${nodeId}): ${error}`);
+    return false;
+  }
+}
+
+/**
  * Find existing Reviso summary comments on the PR.
- * Returns the best comment to reuse (the one with the most cost history)
- * plus any extra duplicates that should be cleaned up.
- * Extracts cost metadata from the best comment.
+ * Returns the previous cost metadata and node IDs of all old summaries
+ * so they can be minimized.
  */
 async function findExistingSummaries(
   octokit: ReturnType<typeof github.getOctokit>,
   owner: string,
   repo: string,
   prNumber: number,
-): Promise<{ commentId: number | null; previousMeta: RevisoMeta | null; duplicateIds: number[] }> {
-  let bestCommentId: number | null = null;
+): Promise<{ previousMeta: RevisoMeta | null; nodeIds: string[] }> {
   let previousMeta: RevisoMeta | null = null;
-  const allCommentIds: number[] = [];
+  const nodeIds: string[] = [];
   let page = 1;
 
   while (true) {
@@ -187,19 +209,14 @@ async function findExistingSummaries(
 
     for (const comment of comments) {
       if (comment.body?.includes(BOT_SIGNATURE)) {
-        allCommentIds.push(comment.id);
+        nodeIds.push(comment.node_id);
 
-        // Keep the comment with the most cost history for reuse
         const meta = parseRevisoMeta(comment.body);
         if (meta && meta.reviews.length > (previousMeta?.reviews.length ?? 0)) {
           previousMeta = meta;
-          bestCommentId = comment.id;
           core.debug(
             `Found summary comment #${comment.id} with ${meta.reviews.length} reviews, $${meta.total_cost.toFixed(4)} total`,
           );
-        } else if (bestCommentId === null) {
-          // No meta found yet — use this comment as fallback (e.g., legacy comment without meta)
-          bestCommentId = comment.id;
         }
       }
     }
@@ -208,10 +225,7 @@ async function findExistingSummaries(
     page++;
   }
 
-  // Duplicates are any Reviso comments that aren't the one we're keeping
-  const duplicateIds = allCommentIds.filter((id) => id !== bestCommentId);
-
-  return { commentId: bestCommentId, previousMeta, duplicateIds };
+  return { previousMeta, nodeIds };
 }
 
 /**
@@ -328,25 +342,21 @@ export async function postReview(
   const octokit = github.getOctokit(config.github_token);
   const { owner, repo } = github.context.repo;
 
-  // ── Idempotency: find previous summary + extract cost meta ──
-  const {
-    commentId: existingSummaryId,
-    previousMeta,
-    duplicateIds,
-  } = await findExistingSummaries(octokit, owner, repo, prNumber);
+  // ── Idempotency: find previous summaries + extract cost meta ──
+  const { previousMeta, nodeIds: oldSummaryNodeIds } = await findExistingSummaries(
+    octokit,
+    owner,
+    repo,
+    prNumber,
+  );
   await deleteExistingReviewComments(octokit, owner, repo, prNumber);
 
-  // Clean up duplicate summary comments (from crash/retry edge cases)
-  for (const dupId of duplicateIds) {
-    await withRetry(
-      () => octokit.rest.issues.deleteComment({ owner, repo, comment_id: dupId }),
-      "delete duplicate comment",
-    );
-    core.debug(`Deleted duplicate Reviso summary comment #${dupId}`);
-  }
-
-  if (existingSummaryId) {
-    core.info("Updating existing Reviso summary (re-run detected).");
+  // Minimize (collapse) old summary comments so the new one is the visible one
+  if (oldSummaryNodeIds.length > 0) {
+    core.info(`Minimizing ${oldSummaryNodeIds.length} previous summary comment(s).`);
+    for (const nodeId of oldSummaryNodeIds) {
+      await minimizeComment(octokit, nodeId);
+    }
   }
 
   // ── Build cumulative cost metadata ──
@@ -458,29 +468,15 @@ export async function postReview(
     );
   }
 
-  if (existingSummaryId) {
-    await withRetry(
-      () =>
-        octokit.rest.issues.updateComment({
-          owner,
-          repo,
-          comment_id: existingSummaryId,
-          body: summaryBody,
-        }),
-      "update summary comment",
-    );
-    core.info("Updated existing review summary comment.");
-  } else {
-    await withRetry(
-      () =>
-        octokit.rest.issues.createComment({
-          owner,
-          repo,
-          issue_number: prNumber,
-          body: summaryBody,
-        }),
-      "create summary comment",
-    );
-    core.info("Posted review summary comment.");
-  }
+  await withRetry(
+    () =>
+      octokit.rest.issues.createComment({
+        owner,
+        repo,
+        issue_number: prNumber,
+        body: summaryBody,
+      }),
+    "create summary comment",
+  );
+  core.info("Posted review summary comment.")
 }
