@@ -37,9 +37,7 @@ export function getConfig(): ActionConfig {
 
   const review_engine = core.getInput("review_engine") || "v2";
   if (review_engine !== "v1" && review_engine !== "v2") {
-    throw new Error(
-      `Invalid review_engine "${review_engine}". Must be "v1" or "v2".`,
-    );
+    throw new Error(`Invalid review_engine "${review_engine}". Must be "v1" or "v2".`);
   }
 
   return {

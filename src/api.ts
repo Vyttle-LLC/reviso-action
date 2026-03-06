@@ -17,9 +17,10 @@ export async function callRevisoApi(
   request: ReviewRequest,
   config: ActionConfig,
 ): Promise<ReviewResponse> {
-  const url = config.review_engine === "v2"
-    ? `${config.api_url}/v1/review/v2`
-    : `${config.api_url}/v1/review`;
+  const url =
+    config.review_engine === "v2"
+      ? `${config.api_url}/v1/review/v2`
+      : `${config.api_url}/v1/review`;
 
   core.info(`Calling Reviso API at ${config.api_url} (engine: ${config.review_engine})...`);
   core.info(
