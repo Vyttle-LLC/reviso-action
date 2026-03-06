@@ -103,7 +103,11 @@ function formatIssueComment(issue: ReviewIssue): string {
     body += `\n\n**Suggestion:**\n\`\`\`\n${issue.suggestion}\n\`\`\``;
   }
 
-  body += `\n\n<sub>Found by ${issue.model} (${issue.pass} pass)</sub>`;
+  if (issue.confidence != null) {
+    body += `\n\n<sub>Found by ${issue.model} (${issue.pass} pass) · confidence: ${(issue.confidence * 100).toFixed(0)}%</sub>`;
+  } else {
+    body += `\n\n<sub>Found by ${issue.model} (${issue.pass} pass)</sub>`;
+  }
 
   return body;
 }
@@ -141,6 +145,14 @@ function formatSummaryComment(
     `| Passes run | ${metrics.passes_run.join(", ")} |`,
     `| Models used | ${metrics.models_used.join(", ")} |`,
     costLine,
+    // Agentic metrics (v2 only)
+    ...(metrics.tool_calls != null
+      ? [
+          `| Tool calls | ${metrics.tool_calls} |`,
+          `| Investigations | ${metrics.investigations ?? 0} |`,
+          `| Discarded by confidence | ${metrics.discarded_by_confidence ?? 0} |`,
+        ]
+      : []),
   ];
 
   if (filteredCount < metrics.issues_found) {

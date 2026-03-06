@@ -25,6 +25,10 @@ inputs:
     description: "Minimum severity to post comments for: high, medium, or low"
     required: false
     default: "low"
+  review_engine:
+    description: "Review engine: v1 (multi-pass) or v2 (agentic with tool-use)"
+    required: false
+    default: "v2"
   custom_instructions:
     description: "Additional instructions to include in the review prompt"
     required: false

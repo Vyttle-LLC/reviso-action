@@ -49,8 +49,10 @@ const REQUEST_TIMEOUT_MS = 120_000; // 2 minutes — reviews can take a while
  * Throws on unrecoverable errors (auth, malformed request, etc).
  */
 async function callRevisoApi(request, config) {
-    const url = `${config.api_url}/v1/review`;
-    core.info(`Calling Reviso API at ${config.api_url}...`);
+    const url = config.review_engine === "v2"
+        ? `${config.api_url}/v1/review/v2`
+        : `${config.api_url}/v1/review`;
+    core.info(`Calling Reviso API at ${config.api_url} (engine: ${config.review_engine})...`);
     core.info(`Sending ${request.files.length} files for review (depth: ${request.options.review_depth})`);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -89,6 +91,11 @@ async function callRevisoApi(request, config) {
         core.info(`Review complete: ${data.metrics.issues_found} issues found`);
         core.info(`Passes run: ${data.metrics.passes_run.join(", ")} | ` +
             `Estimated cost: $${data.metrics.estimated_cost_usd.toFixed(4)}`);
+        if (data.metrics.tool_calls != null) {
+            core.info(`Tool calls: ${data.metrics.tool_calls} | ` +
+                `Investigations: ${data.metrics.investigations ?? 0} | ` +
+                `Discarded by confidence: ${data.metrics.discarded_by_confidence ?? 0}`);
+        }
         return data;
     }
     catch (error) {
@@ -234,7 +241,12 @@ function formatIssueComment(issue) {
     if (issue.suggestion) {
         body += `\n\n**Suggestion:**\n\`\`\`\n${issue.suggestion}\n\`\`\``;
     }
-    body += `\n\n<sub>Found by ${issue.model} (${issue.pass} pass)</sub>`;
+    if (issue.confidence != null) {
+        body += `\n\n<sub>Found by ${issue.model} (${issue.pass} pass) · confidence: ${(issue.confidence * 100).toFixed(0)}%</sub>`;
+    }
+    else {
+        body += `\n\n<sub>Found by ${issue.model} (${issue.pass} pass)</sub>`;
+    }
     return body;
 }
 /**
@@ -263,6 +275,14 @@ function formatSummaryComment(response, filteredCount, meta) {
         `| Passes run | ${metrics.passes_run.join(", ")} |`,
         `| Models used | ${metrics.models_used.join(", ")} |`,
         costLine,
+        // Agentic metrics (v2 only)
+        ...(metrics.tool_calls != null
+            ? [
+                `| Tool calls | ${metrics.tool_calls} |`,
+                `| Investigations | ${metrics.investigations ?? 0} |`,
+                `| Discarded by confidence | ${metrics.discarded_by_confidence ?? 0} |`,
+            ]
+            : []),
     ];
     if (filteredCount < metrics.issues_found) {
         lines.push("", `> **Note:** ${metrics.issues_found - filteredCount} issues below the severity threshold were omitted from inline comments.`);
@@ -573,6 +593,10 @@ function getConfig() {
     }
     const custom_instructions = core.getInput("custom_instructions") || "";
     const api_url = core.getInput("api_url") || "https://api.reviso.dev";
+    const review_engine = core.getInput("review_engine") || "v2";
+    if (review_engine !== "v1" && review_engine !== "v2") {
+        throw new Error(`Invalid review_engine "${review_engine}". Must be "v1" or "v2".`);
+    }
     return {
         reviso_api_key,
         anthropic_api_key,
@@ -582,6 +606,7 @@ function getConfig() {
         max_files,
         api_url: api_url.replace(/\/$/, ""), // strip trailing slash
         github_token,
+        review_engine: review_engine,
     };
 }
 //# sourceMappingURL=config.js.map

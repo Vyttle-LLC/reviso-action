@@ -35,6 +35,11 @@ export function getConfig(): ActionConfig {
   const custom_instructions = core.getInput("custom_instructions") || "";
   const api_url = core.getInput("api_url") || "https://api.reviso.dev";
 
+  const review_engine = core.getInput("review_engine") || "v2";
+  if (review_engine !== "v1" && review_engine !== "v2") {
+    throw new Error(`Invalid review_engine "${review_engine}". Must be "v1" or "v2".`);
+  }
+
   return {
     reviso_api_key,
     anthropic_api_key,
@@ -44,5 +49,6 @@ export function getConfig(): ActionConfig {
     max_files,
     api_url: api_url.replace(/\/$/, ""), // strip trailing slash
     github_token,
+    review_engine: review_engine as "v1" | "v2",
   };
 }
