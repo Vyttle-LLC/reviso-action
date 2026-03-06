@@ -11,7 +11,8 @@ export type IssueCategory =
   | "best-practice"
   | "architecture";
 export type FileStatus = "added" | "modified" | "removed" | "renamed";
-export type ReviewPass = "diff" | "context";
+export type ReviewPass = "diff" | "context" | "agentic";
+export type ReviewEngine = "v1" | "v2";
 
 // ── Request Types ───────────────────────────────────────────────
 
@@ -63,6 +64,8 @@ export interface ReviewIssue {
   suggestion: string | null;
   pass: ReviewPass;
   model: string;
+  confidence?: number;
+  verified_by?: string;
 }
 
 export interface ReviewMetrics {
@@ -77,6 +80,9 @@ export interface ReviewMetrics {
   estimated_cost_usd: number;
   total_input_tokens: number;
   total_output_tokens: number;
+  tool_calls?: number;
+  investigations?: number;
+  discarded_by_confidence?: number;
 }
 
 export interface ReviewResponse {
@@ -110,4 +116,5 @@ export interface ActionConfig {
   max_files: number;
   api_url: string;
   github_token: string;
+  review_engine: "v1" | "v2";
 }

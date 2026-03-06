@@ -17,9 +17,11 @@ export async function callRevisoApi(
   request: ReviewRequest,
   config: ActionConfig,
 ): Promise<ReviewResponse> {
-  const url = `${config.api_url}/v1/review`;
+  const url = config.review_engine === "v2"
+    ? `${config.api_url}/v1/review/v2`
+    : `${config.api_url}/v1/review`;
 
-  core.info(`Calling Reviso API at ${config.api_url}...`);
+  core.info(`Calling Reviso API at ${config.api_url} (engine: ${config.review_engine})...`);
   core.info(
     `Sending ${request.files.length} files for review (depth: ${request.options.review_depth})`,
   );
@@ -68,6 +70,14 @@ export async function callRevisoApi(
       `Passes run: ${data.metrics.passes_run.join(", ")} | ` +
         `Estimated cost: $${data.metrics.estimated_cost_usd.toFixed(4)}`,
     );
+
+    if (data.metrics.tool_calls != null) {
+      core.info(
+        `Tool calls: ${data.metrics.tool_calls} | ` +
+          `Investigations: ${data.metrics.investigations ?? 0} | ` +
+          `Discarded by confidence: ${data.metrics.discarded_by_confidence ?? 0}`,
+      );
+    }
 
     return data;
   } catch (error) {
