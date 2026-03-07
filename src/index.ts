@@ -1,8 +1,13 @@
 import * as core from "@actions/core";
 import { callRevisoApi } from "./api.js";
-import { postReview } from "./comments.js";
+import { findExistingSummaries, postReview } from "./comments.js";
 import { getConfig } from "./config.js";
-import { getChangedFiles, getPrMetadata, populateFileContents } from "./github.js";
+import {
+  getChangedFiles,
+  getChangedFilesBetweenCommits,
+  getPrMetadata,
+  populateFileContents,
+} from "./github.js";
 import type { ReviewRequest } from "./types.js";
 
 async function run(): Promise<void> {
@@ -36,6 +41,48 @@ async function run(): Promise<void> {
     const filesWithContents = files.filter((f) => f.contents !== null).length;
     core.info(`Fetched full contents for ${filesWithContents}/${files.length} files`);
 
+    // ── Step 3.5: Incremental review — only review files changed since last review ──
+    const octokit = (await import("@actions/github")).getOctokit(config.github_token);
+    const { owner, repo } = (await import("@actions/github")).context.repo;
+    const existingSummaries = await findExistingSummaries(octokit, owner, repo, pr.number);
+
+    let changedFiles: string[] | undefined;
+    const prFilenames = files.map((f) => f.filename);
+
+    if (existingSummaries.lastReviewedSha) {
+      core.info(`Last reviewed SHA: ${existingSummaries.lastReviewedSha}`);
+      const changedSince = await getChangedFilesBetweenCommits(
+        config,
+        existingSummaries.lastReviewedSha,
+        pr.head_sha,
+      );
+
+      if (changedSince !== null) {
+        const changedSet = new Set(changedSince);
+        const intersected = prFilenames.filter((f) => changedSet.has(f));
+
+        if (intersected.length === 0) {
+          core.info("No files changed since last review. Skipping.");
+          core.setOutput("issues_count", 0);
+          core.setOutput("high_severity_count", 0);
+          return;
+        }
+
+        if (intersected.length < files.length) {
+          changedFiles = intersected;
+          core.info(
+            `Incremental review: ${intersected.length}/${files.length} files changed since last review.`,
+          );
+        } else {
+          core.info("All PR files changed since last review — doing full review.");
+        }
+      } else {
+        core.info("Could not compare commits — doing full review.");
+      }
+    } else {
+      core.info("No previous review found — doing full review.");
+    }
+
     // ── Step 4: Build the request payload ──
     const request: ReviewRequest = {
       pr,
@@ -45,6 +92,7 @@ async function run(): Promise<void> {
         severity_threshold: config.severity_threshold,
         custom_instructions: config.custom_instructions,
         max_files: config.max_files,
+        ...(changedFiles ? { changed_files: changedFiles } : {}),
       },
       credentials: {
         anthropic_api_key: config.anthropic_api_key,
@@ -73,7 +121,7 @@ async function run(): Promise<void> {
     core.setOutput("high_severity_count", response.metrics.high_severity_count);
 
     // ── Step 8: Post review comments on PR ──
-    await postReview(config, pr.number, response);
+    await postReview(config, pr.number, response, existingSummaries, pr.head_sha);
 
     core.info("✅ Reviso Action completed.");
   } catch (error) {
