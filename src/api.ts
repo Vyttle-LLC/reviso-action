@@ -1,7 +1,8 @@
 import * as core from "@actions/core";
 import type { ActionConfig, ReviewRequest, ReviewResponse } from "./types.js";
 
-const REQUEST_TIMEOUT_MS = 120_000; // 2 minutes — reviews can take a while
+const V1_TIMEOUT_MS = 300_000; // 5 minutes for multi-pass pipeline
+const V2_TIMEOUT_MS = 300_000; // 5 minutes for agentic pipeline (multiple tool-use round-trips)
 
 interface ApiError {
   error: string;
@@ -27,8 +28,9 @@ export async function callRevisoApi(
     `Sending ${request.files.length} files for review (depth: ${request.options.review_depth})`,
   );
 
+  const timeoutMs = config.review_engine === "v2" ? V2_TIMEOUT_MS : V1_TIMEOUT_MS;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(url, {
@@ -84,7 +86,7 @@ export async function callRevisoApi(
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
       throw new Error(
-        `Reviso API request timed out after ${REQUEST_TIMEOUT_MS / 1000}s. The PR may be too large, or the API may be experiencing issues.`,
+        `Reviso API request timed out after ${timeoutMs / 1000}s. The PR may be too large, or the API may be experiencing issues.`,
       );
     }
     throw error;

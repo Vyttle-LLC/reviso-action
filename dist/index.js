@@ -42,7 +42,8 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.callRevisoApi = callRevisoApi;
 const core = __importStar(__nccwpck_require__(7484));
-const REQUEST_TIMEOUT_MS = 120_000; // 2 minutes — reviews can take a while
+const V1_TIMEOUT_MS = 300_000; // 5 minutes for multi-pass pipeline
+const V2_TIMEOUT_MS = 300_000; // 5 minutes for agentic pipeline (multiple tool-use round-trips)
 /**
  * Call the Reviso API with the review request payload.
  * Returns the parsed ReviewResponse on success.
@@ -54,8 +55,9 @@ async function callRevisoApi(request, config) {
         : `${config.api_url}/v1/review`;
     core.info(`Calling Reviso API at ${config.api_url} (engine: ${config.review_engine})...`);
     core.info(`Sending ${request.files.length} files for review (depth: ${request.options.review_depth})`);
+    const timeoutMs = config.review_engine === "v2" ? V2_TIMEOUT_MS : V1_TIMEOUT_MS;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
         const response = await fetch(url, {
             method: "POST",
@@ -100,7 +102,7 @@ async function callRevisoApi(request, config) {
     }
     catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") {
-            throw new Error(`Reviso API request timed out after ${REQUEST_TIMEOUT_MS / 1000}s. The PR may be too large, or the API may be experiencing issues.`);
+            throw new Error(`Reviso API request timed out after ${timeoutMs / 1000}s. The PR may be too large, or the API may be experiencing issues.`);
         }
         throw error;
     }
