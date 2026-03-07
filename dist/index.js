@@ -156,6 +156,9 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.filterBySeverity = filterBySeverity;
 exports.parseRevisoMeta = parseRevisoMeta;
 exports.serializeRevisoMeta = serializeRevisoMeta;
+exports.parseLastReviewedSha = parseLastReviewedSha;
+exports.serializeLastReviewedSha = serializeLastReviewedSha;
+exports.findExistingSummaries = findExistingSummaries;
 exports.postReview = postReview;
 const core = __importStar(__nccwpck_require__(7484));
 const github = __importStar(__nccwpck_require__(3228));
@@ -163,6 +166,7 @@ const SEVERITY_ORDER = { high: 3, medium: 2, low: 1 };
 const SEVERITY_EMOJI = { high: "🔴", medium: "🟡", low: "🔵" };
 const BOT_SIGNATURE = "<!-- reviso-review -->";
 const META_REGEX = /<!-- reviso-meta:(.*?) -->/s;
+const LAST_REVIEWED_SHA_REGEX = /<!-- reviso:last-reviewed-sha:([a-f0-9]+) -->/;
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
 // ── Rate Limit Handling ─────────────────────────────────────────
@@ -223,6 +227,20 @@ function serializeRevisoMeta(meta) {
     return `<!-- reviso-meta:${JSON.stringify(meta)} -->`;
 }
 /**
+ * Parse the last-reviewed SHA from a comment body.
+ * Returns null if the marker is missing.
+ */
+function parseLastReviewedSha(body) {
+    const match = body.match(LAST_REVIEWED_SHA_REGEX);
+    return match?.[1] ?? null;
+}
+/**
+ * Serialize a SHA into a hidden HTML comment marker.
+ */
+function serializeLastReviewedSha(sha) {
+    return `<!-- reviso:last-reviewed-sha:${sha} -->`;
+}
+/**
  * Build a RevisoMeta by appending a new review entry to the previous meta.
  */
 function buildUpdatedMeta(previous, reviewId, cost) {
@@ -254,7 +272,7 @@ function formatIssueComment(issue) {
 /**
  * Build the summary comment body with metrics, cumulative cost, and issue overview.
  */
-function formatSummaryComment(response, filteredCount, meta) {
+function formatSummaryComment(response, filteredCount, meta, headSha) {
     const { metrics, summary } = response;
     const costLine = meta.reviews.length > 1
         ? `| Estimated cost | $${metrics.estimated_cost_usd.toFixed(4)} (this review) · $${meta.total_cost.toFixed(4)} total across ${meta.reviews.length} reviews |`
@@ -289,7 +307,7 @@ function formatSummaryComment(response, filteredCount, meta) {
     if (filteredCount < metrics.issues_found) {
         lines.push("", `> **Note:** ${metrics.issues_found - filteredCount} issues below the severity threshold were omitted from inline comments.`);
     }
-    lines.push("", serializeRevisoMeta(meta), BOT_SIGNATURE);
+    lines.push("", serializeLastReviewedSha(headSha), serializeRevisoMeta(meta), BOT_SIGNATURE);
     return lines.join("\n");
 }
 // ── Idempotency ─────────────────────────────────────────────────
@@ -318,6 +336,7 @@ async function minimizeComment(octokit, nodeId) {
  */
 async function findExistingSummaries(octokit, owner, repo, prNumber) {
     let previousMeta = null;
+    let lastReviewedSha = null;
     const nodeIds = [];
     let page = 1;
     while (true) {
@@ -336,6 +355,7 @@ async function findExistingSummaries(octokit, owner, repo, prNumber) {
                 const meta = parseRevisoMeta(comment.body);
                 if (meta && meta.reviews.length > (previousMeta?.reviews.length ?? 0)) {
                     previousMeta = meta;
+                    lastReviewedSha = parseLastReviewedSha(comment.body);
                     core.debug(`Found summary comment #${comment.id} with ${meta.reviews.length} reviews, $${meta.total_cost.toFixed(4)} total`);
                 }
             }
@@ -344,7 +364,7 @@ async function findExistingSummaries(octokit, owner, repo, prNumber) {
             break;
         page++;
     }
-    return { previousMeta, nodeIds };
+    return { previousMeta, nodeIds, lastReviewedSha };
 }
 /**
  * Delete all Reviso inline review comments on the PR.
@@ -431,11 +451,11 @@ function buildPositionMap(patch) {
 /**
  * Post the review: inline comments on specific lines + summary comment.
  */
-async function postReview(config, prNumber, response) {
+async function postReview(config, prNumber, response, existingSummaries, headSha) {
     const octokit = github.getOctokit(config.github_token);
     const { owner, repo } = github.context.repo;
-    // ── Idempotency: find previous summaries + extract cost meta ──
-    const { previousMeta, nodeIds: oldSummaryNodeIds } = await findExistingSummaries(octokit, owner, repo, prNumber);
+    // ── Idempotency: use pre-computed summaries ──
+    const { previousMeta, nodeIds: oldSummaryNodeIds } = existingSummaries;
     await deleteExistingReviewComments(octokit, owner, repo, prNumber);
     // Minimize (collapse) old summary comments so the new one is the visible one
     if (oldSummaryNodeIds.length > 0) {
@@ -506,7 +526,7 @@ async function postReview(config, prNumber, response) {
         }
     }
     // ── Post summary comment ──
-    let summaryBody = formatSummaryComment(response, filteredIssues.length, meta);
+    let summaryBody = formatSummaryComment(response, filteredIssues.length, meta, headSha);
     // Append any issues that couldn't be posted inline
     if (skippedIssues.length > 0) {
         const skippedSection = [
@@ -656,6 +676,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.getPrMetadata = getPrMetadata;
 exports.getChangedFiles = getChangedFiles;
+exports.getChangedFilesBetweenCommits = getChangedFilesBetweenCommits;
 exports.populateFileContents = populateFileContents;
 const core = __importStar(__nccwpck_require__(7484));
 const github = __importStar(__nccwpck_require__(3228));
@@ -704,6 +725,7 @@ function getPrMetadata() {
         author: pr.user?.login ?? "",
         base_ref: pr.base?.ref ?? "",
         head_ref: pr.head?.ref ?? "",
+        head_sha: pr.head?.sha ?? "",
         repo: `${context.repo.owner}/${context.repo.repo}`,
     };
 }
@@ -758,6 +780,31 @@ async function getChangedFiles(config, prNumber) {
         return allFiles.slice(0, config.max_files);
     }
     return allFiles;
+}
+/**
+ * Compare two commits and return the list of changed filenames.
+ * Returns null if the comparison fails or the base SHA is not an ancestor
+ * (e.g., after a force push), signaling that a full review should be done.
+ */
+async function getChangedFilesBetweenCommits(config, baseSha, headSha) {
+    const octokit = github.getOctokit(config.github_token);
+    const { owner, repo } = github.context.repo;
+    try {
+        const { data } = await octokit.rest.repos.compareCommitsWithBasehead({
+            owner,
+            repo,
+            basehead: `${baseSha}...${headSha}`,
+        });
+        if (data.status !== "ahead") {
+            core.info(`Commit comparison status is "${data.status}" — falling back to full review.`);
+            return null;
+        }
+        return (data.files ?? []).map((f) => f.filename);
+    }
+    catch (error) {
+        core.warning(`Failed to compare commits ${baseSha}...${headSha}: ${error}`);
+        return null;
+    }
 }
 /**
  * Fetch full file contents for each file (used by Pass 2 context review).
@@ -860,6 +907,39 @@ async function run() {
         await (0, github_js_1.populateFileContents)(config, files, pr.head_ref);
         const filesWithContents = files.filter((f) => f.contents !== null).length;
         core.info(`Fetched full contents for ${filesWithContents}/${files.length} files`);
+        // ── Step 3.5: Incremental review — only review files changed since last review ──
+        const octokit = (await Promise.resolve(/* import() */).then(__nccwpck_require__.t.bind(__nccwpck_require__, 3228, 23))).getOctokit(config.github_token);
+        const { owner, repo } = (await Promise.resolve(/* import() */).then(__nccwpck_require__.t.bind(__nccwpck_require__, 3228, 23))).context.repo;
+        const existingSummaries = await (0, comments_js_1.findExistingSummaries)(octokit, owner, repo, pr.number);
+        let changedFiles;
+        const prFilenames = files.map((f) => f.filename);
+        if (existingSummaries.lastReviewedSha) {
+            core.info(`Last reviewed SHA: ${existingSummaries.lastReviewedSha}`);
+            const changedSince = await (0, github_js_1.getChangedFilesBetweenCommits)(config, existingSummaries.lastReviewedSha, pr.head_sha);
+            if (changedSince !== null) {
+                const changedSet = new Set(changedSince);
+                const intersected = prFilenames.filter((f) => changedSet.has(f));
+                if (intersected.length === 0) {
+                    core.info("No files changed since last review. Skipping.");
+                    core.setOutput("issues_count", 0);
+                    core.setOutput("high_severity_count", 0);
+                    return;
+                }
+                if (intersected.length < files.length) {
+                    changedFiles = intersected;
+                    core.info(`Incremental review: ${intersected.length}/${files.length} files changed since last review.`);
+                }
+                else {
+                    core.info("All PR files changed since last review — doing full review.");
+                }
+            }
+            else {
+                core.info("Could not compare commits — doing full review.");
+            }
+        }
+        else {
+            core.info("No previous review found — doing full review.");
+        }
         // ── Step 4: Build the request payload ──
         const request = {
             pr,
@@ -869,6 +949,7 @@ async function run() {
                 severity_threshold: config.severity_threshold,
                 custom_instructions: config.custom_instructions,
                 max_files: config.max_files,
+                ...(changedFiles ? { changed_files: changedFiles } : {}),
             },
             credentials: {
                 anthropic_api_key: config.anthropic_api_key,
@@ -889,7 +970,7 @@ async function run() {
         core.setOutput("issues_count", response.metrics.issues_found);
         core.setOutput("high_severity_count", response.metrics.high_severity_count);
         // ── Step 8: Post review comments on PR ──
-        await (0, comments_js_1.postReview)(config, pr.number, response);
+        await (0, comments_js_1.postReview)(config, pr.number, response, existingSummaries, pr.head_sha);
         core.info("✅ Reviso Action completed.");
     }
     catch (error) {
@@ -32733,6 +32814,64 @@ module.exports = parseParams
 /******/ 	}
 /******/ 	
 /************************************************************************/
+/******/ 	/* webpack/runtime/create fake namespace object */
+/******/ 	(() => {
+/******/ 		var getProto = Object.getPrototypeOf ? (obj) => (Object.getPrototypeOf(obj)) : (obj) => (obj.__proto__);
+/******/ 		var leafPrototypes;
+/******/ 		// create a fake namespace object
+/******/ 		// mode & 1: value is a module id, require it
+/******/ 		// mode & 2: merge all properties of value into the ns
+/******/ 		// mode & 4: return value when already ns object
+/******/ 		// mode & 16: return value when it's Promise-like
+/******/ 		// mode & 8|1: behave like require
+/******/ 		__nccwpck_require__.t = function(value, mode) {
+/******/ 			if(mode & 1) value = this(value);
+/******/ 			if(mode & 8) return value;
+/******/ 			if(typeof value === 'object' && value) {
+/******/ 				if((mode & 4) && value.__esModule) return value;
+/******/ 				if((mode & 16) && typeof value.then === 'function') return value;
+/******/ 			}
+/******/ 			var ns = Object.create(null);
+/******/ 			__nccwpck_require__.r(ns);
+/******/ 			var def = {};
+/******/ 			leafPrototypes = leafPrototypes || [null, getProto({}), getProto([]), getProto(getProto)];
+/******/ 			for(var current = mode & 2 && value; typeof current == 'object' && !~leafPrototypes.indexOf(current); current = getProto(current)) {
+/******/ 				Object.getOwnPropertyNames(current).forEach((key) => (def[key] = () => (value[key])));
+/******/ 			}
+/******/ 			def['default'] = () => (value);
+/******/ 			__nccwpck_require__.d(ns, def);
+/******/ 			return ns;
+/******/ 		};
+/******/ 	})();
+/******/ 	
+/******/ 	/* webpack/runtime/define property getters */
+/******/ 	(() => {
+/******/ 		// define getter functions for harmony exports
+/******/ 		__nccwpck_require__.d = (exports, definition) => {
+/******/ 			for(var key in definition) {
+/******/ 				if(__nccwpck_require__.o(definition, key) && !__nccwpck_require__.o(exports, key)) {
+/******/ 					Object.defineProperty(exports, key, { enumerable: true, get: definition[key] });
+/******/ 				}
+/******/ 			}
+/******/ 		};
+/******/ 	})();
+/******/ 	
+/******/ 	/* webpack/runtime/hasOwnProperty shorthand */
+/******/ 	(() => {
+/******/ 		__nccwpck_require__.o = (obj, prop) => (Object.prototype.hasOwnProperty.call(obj, prop))
+/******/ 	})();
+/******/ 	
+/******/ 	/* webpack/runtime/make namespace object */
+/******/ 	(() => {
+/******/ 		// define __esModule on exports
+/******/ 		__nccwpck_require__.r = (exports) => {
+/******/ 			if(typeof Symbol !== 'undefined' && Symbol.toStringTag) {
+/******/ 				Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
+/******/ 			}
+/******/ 			Object.defineProperty(exports, '__esModule', { value: true });
+/******/ 		};
+/******/ 	})();
+/******/ 	
 /******/ 	/* webpack/runtime/compat */
 /******/ 	
 /******/ 	if (typeof __nccwpck_require__ !== 'undefined') __nccwpck_require__.ab = __dirname + "/";
