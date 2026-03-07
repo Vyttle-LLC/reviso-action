@@ -51,6 +51,7 @@ export function getPrMetadata(): PrMetadata {
     author: pr.user?.login ?? "",
     base_ref: pr.base?.ref ?? "",
     head_ref: pr.head?.ref ?? "",
+    head_sha: pr.head?.sha ?? "",
     repo: `${context.repo.owner}/${context.repo.repo}`,
   };
 }
@@ -116,6 +117,38 @@ export async function getChangedFiles(config: ActionConfig, prNumber: number): P
   }
 
   return allFiles;
+}
+
+/**
+ * Compare two commits and return the list of changed filenames.
+ * Returns null if the comparison fails or the base SHA is not an ancestor
+ * (e.g., after a force push), signaling that a full review should be done.
+ */
+export async function getChangedFilesBetweenCommits(
+  config: ActionConfig,
+  baseSha: string,
+  headSha: string,
+): Promise<string[] | null> {
+  const octokit = github.getOctokit(config.github_token);
+  const { owner, repo } = github.context.repo;
+
+  try {
+    const { data } = await octokit.rest.repos.compareCommitsWithBasehead({
+      owner,
+      repo,
+      basehead: `${baseSha}...${headSha}`,
+    });
+
+    if (data.status !== "ahead") {
+      core.info(`Commit comparison status is "${data.status}" — falling back to full review.`);
+      return null;
+    }
+
+    return (data.files ?? []).map((f) => f.filename);
+  } catch (error) {
+    core.warning(`Failed to compare commits ${baseSha}...${headSha}: ${error}`);
+    return null;
+  }
 }
 
 /**

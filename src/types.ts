@@ -23,6 +23,7 @@ export interface PrMetadata {
   author: string;
   base_ref: string;
   head_ref: string;
+  head_sha: string;
   repo: string;
 }
 
@@ -40,6 +41,7 @@ export interface ReviewOptions {
   severity_threshold: Severity;
   custom_instructions: string;
   max_files: number;
+  changed_files?: string[];
 }
 
 export interface ReviewCredentials {

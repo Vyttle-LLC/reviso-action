@@ -6,6 +6,7 @@ const SEVERITY_ORDER: Record<Severity, number> = { high: 3, medium: 2, low: 1 };
 const SEVERITY_EMOJI: Record<Severity, string> = { high: "🔴", medium: "🟡", low: "🔵" };
 const BOT_SIGNATURE = "<!-- reviso-review -->";
 const META_REGEX = /<!-- reviso-meta:(.*?) -->/s;
+const LAST_REVIEWED_SHA_REGEX = /<!-- reviso:last-reviewed-sha:([a-f0-9]+) -->/;
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
 
@@ -78,6 +79,22 @@ export function serializeRevisoMeta(meta: RevisoMeta): string {
 }
 
 /**
+ * Parse the last-reviewed SHA from a comment body.
+ * Returns null if the marker is missing.
+ */
+export function parseLastReviewedSha(body: string): string | null {
+  const match = body.match(LAST_REVIEWED_SHA_REGEX);
+  return match?.[1] ?? null;
+}
+
+/**
+ * Serialize a SHA into a hidden HTML comment marker.
+ */
+export function serializeLastReviewedSha(sha: string): string {
+  return `<!-- reviso:last-reviewed-sha:${sha} -->`;
+}
+
+/**
  * Build a RevisoMeta by appending a new review entry to the previous meta.
  */
 function buildUpdatedMeta(previous: RevisoMeta | null, reviewId: string, cost: number): RevisoMeta {
@@ -119,6 +136,7 @@ function formatSummaryComment(
   response: ReviewResponse,
   filteredCount: number,
   meta: RevisoMeta,
+  headSha: string,
 ): string {
   const { metrics, summary } = response;
 
@@ -162,7 +180,7 @@ function formatSummaryComment(
     );
   }
 
-  lines.push("", serializeRevisoMeta(meta), BOT_SIGNATURE);
+  lines.push("", serializeLastReviewedSha(headSha), serializeRevisoMeta(meta), BOT_SIGNATURE);
 
   return lines.join("\n");
 }
@@ -198,13 +216,14 @@ async function minimizeComment(
  * Returns the previous cost metadata and node IDs of all old summaries
  * so they can be minimized.
  */
-async function findExistingSummaries(
+export async function findExistingSummaries(
   octokit: ReturnType<typeof github.getOctokit>,
   owner: string,
   repo: string,
   prNumber: number,
-): Promise<{ previousMeta: RevisoMeta | null; nodeIds: string[] }> {
+): Promise<{ previousMeta: RevisoMeta | null; nodeIds: string[]; lastReviewedSha: string | null }> {
   let previousMeta: RevisoMeta | null = null;
+  let lastReviewedSha: string | null = null;
   const nodeIds: string[] = [];
   let page = 1;
 
@@ -226,6 +245,7 @@ async function findExistingSummaries(
         const meta = parseRevisoMeta(comment.body);
         if (meta && meta.reviews.length > (previousMeta?.reviews.length ?? 0)) {
           previousMeta = meta;
+          lastReviewedSha = parseLastReviewedSha(comment.body);
           core.debug(
             `Found summary comment #${comment.id} with ${meta.reviews.length} reviews, $${meta.total_cost.toFixed(4)} total`,
           );
@@ -237,7 +257,7 @@ async function findExistingSummaries(
     page++;
   }
 
-  return { previousMeta, nodeIds };
+  return { previousMeta, nodeIds, lastReviewedSha };
 }
 
 /**
@@ -350,17 +370,14 @@ export async function postReview(
   config: ActionConfig,
   prNumber: number,
   response: ReviewResponse,
+  existingSummaries: { previousMeta: RevisoMeta | null; nodeIds: string[] },
+  headSha: string,
 ): Promise<void> {
   const octokit = github.getOctokit(config.github_token);
   const { owner, repo } = github.context.repo;
 
-  // ── Idempotency: find previous summaries + extract cost meta ──
-  const { previousMeta, nodeIds: oldSummaryNodeIds } = await findExistingSummaries(
-    octokit,
-    owner,
-    repo,
-    prNumber,
-  );
+  // ── Idempotency: use pre-computed summaries ──
+  const { previousMeta, nodeIds: oldSummaryNodeIds } = existingSummaries;
   await deleteExistingReviewComments(octokit, owner, repo, prNumber);
 
   // Minimize (collapse) old summary comments so the new one is the visible one
@@ -460,7 +477,7 @@ export async function postReview(
   }
 
   // ── Post summary comment ──
-  let summaryBody = formatSummaryComment(response, filteredIssues.length, meta);
+  let summaryBody = formatSummaryComment(response, filteredIssues.length, meta, headSha);
 
   // Append any issues that couldn't be posted inline
   if (skippedIssues.length > 0) {

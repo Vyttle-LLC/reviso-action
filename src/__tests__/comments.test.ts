@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { filterBySeverity, parseRevisoMeta, serializeRevisoMeta } from "../comments.js";
+import {
+  filterBySeverity,
+  parseLastReviewedSha,
+  parseRevisoMeta,
+  serializeLastReviewedSha,
+  serializeRevisoMeta,
+} from "../comments.js";
 import type { RevisoMeta } from "../types.js";
 import { sampleIssues } from "./fixtures.js";
 
@@ -84,5 +90,35 @@ describe("serializeRevisoMeta", () => {
     const meta: RevisoMeta = { reviews: [], total_cost: 0 };
     const result = serializeRevisoMeta(meta);
     expect(result).toMatch(/^<!-- reviso-meta:.*-->$/);
+  });
+});
+
+describe("parseLastReviewedSha", () => {
+  it("parses a valid SHA marker", () => {
+    const body = "Some text\n<!-- reviso:last-reviewed-sha:abc123def456 -->\nMore text";
+    expect(parseLastReviewedSha(body)).toBe("abc123def456");
+  });
+
+  it("returns null when no marker is present", () => {
+    const body = "Just a regular comment\n<!-- reviso-review -->";
+    expect(parseLastReviewedSha(body)).toBeNull();
+  });
+
+  it("returns null for empty string", () => {
+    expect(parseLastReviewedSha("")).toBeNull();
+  });
+});
+
+describe("serializeLastReviewedSha", () => {
+  it("produces correct format", () => {
+    const result = serializeLastReviewedSha("abc123");
+    expect(result).toBe("<!-- reviso:last-reviewed-sha:abc123 -->");
+  });
+
+  it("round-trips through parse", () => {
+    const sha = "deadbeef1234567890abcdef";
+    const serialized = serializeLastReviewedSha(sha);
+    const parsed = parseLastReviewedSha(serialized);
+    expect(parsed).toBe(sha);
   });
 });
