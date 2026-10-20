@@ -1,5 +1,16 @@
 # Reviso — AI Code Review
 
+> [!WARNING]
+> **This Action is retired and unmaintained.** It depended on a hosted Reviso API that no longer exists and is not planned, so it no longer works.
+>
+> Reviso is now an open-source, local review plugin for Claude Code and Codex: **https://github.com/Vyttle-LLC/reviso**
+>
+> This repository is archived and kept for history.
+
+## Historical documentation
+
+The rest of this README describes the retired Action as it last worked.
+
 A GitHub Action that sends PR diffs to the Reviso API for AI-powered, multi-pass code review using Claude.
 
 ## How it works
